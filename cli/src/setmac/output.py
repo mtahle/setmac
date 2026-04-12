@@ -49,6 +49,10 @@ def emit_complete(tool: str, version: str | None = None):
     emit("complete", tool=tool, status="installed", version=version)
 
 
+def emit_uninstalled(tool: str):
+    emit("uninstalled", tool=tool, status="not_installed")
+
+
 def emit_auth_required(tool: str, message: str):
     """Emit auth_required so the app can prompt for admin password."""
     emit("auth_required", tool=tool, message=message)

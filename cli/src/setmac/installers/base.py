@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import traceback
 
 from setmac.output import (
@@ -14,6 +15,7 @@ from setmac.output import (
     emit_log,
     emit_progress,
     emit_status,
+    emit_uninstalled,
 )
 from setmac.registry import Tool
 
@@ -71,6 +73,41 @@ def _run_quiet(cmd: str, timeout: int = 10) -> subprocess.CompletedProcess:
         return subprocess.CompletedProcess(cmd, returncode=1, stdout="", stderr="error")
 
 
+def _run_streaming(
+    cmd: list[str] | str,
+    tool_id: str,
+    timeout: int = 600,
+    shell: bool = False,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """Run a command and stream stdout+stderr line-by-line via emit_log. Returns True on success."""
+    run_env = env if env is not None else _shell_env()
+    try:
+        with subprocess.Popen(
+            cmd,
+            shell=shell,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=run_env,
+        ) as proc:
+            deadline = time.monotonic() + timeout
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if time.monotonic() > deadline:
+                    proc.kill()
+                    emit_error(tool_id, f"Timed out after {timeout // 60} minute(s)")
+                    return False
+                stripped = line.rstrip()
+                if stripped:
+                    emit_log(stripped, tool=tool_id)
+            proc.wait()
+            return proc.returncode == 0
+    except Exception as e:
+        emit_error(tool_id, f"Process error: {e}")
+        return False
+
+
 # ─── Check ────────────────────────────────────────────────────
 
 def check_tool(tool: Tool) -> tuple[bool, str | None]:
@@ -89,15 +126,7 @@ def check_tool(tool: Tool) -> tuple[bool, str | None]:
         if result.returncode == 0:
             installed = True
 
-    # 3. For brew tools, also try `command -v <binary>` as fallback
-    #    This catches tools installed via Xcode CLT, system, etc.
-    if not installed and tool.install.target:
-        binary = tool.install.target.split("@")[0]  # python@3.14 -> python
-        result = _run_quiet(f"command -v {binary}")
-        if result.returncode == 0:
-            installed = True
-
-    # 4. For cask apps, check common app paths
+    # 3. For cask apps, check common app paths as a final fallback
     if not installed and tool.install.method == "brew_cask":
         app_name = tool.name
         for base in ["/Applications", os.path.expanduser("~/Applications")]:
@@ -188,10 +217,48 @@ def run_tool(tool: Tool) -> None:
         emit_log(traceback.format_exc(), tool=tool.id)
 
 
+# ─── Uninstall ────────────────────────────────────────────────
+
+def uninstall_tool(tool: Tool) -> None:
+    """Uninstall a tool based on its install method. Emits uninstalled or error."""
+    try:
+        method = tool.install.method
+        if method == "brew_formula":
+            ok = _brew_uninstall(tool, cask=False)
+        elif method == "brew_cask":
+            ok = _brew_uninstall(tool, cask=True)
+        else:
+            emit_error(tool.id, f"Uninstall not supported for install method: {method}")
+            return
+
+        if ok:
+            emit_uninstalled(tool.id)
+        else:
+            emit_error(tool.id, f"Failed to uninstall {tool.name}")
+    except Exception as e:
+        emit_error(tool.id, f"Unexpected error during uninstall: {e}")
+
+
+def _brew_uninstall(tool: Tool, cask: bool) -> bool:
+    """Uninstall via Homebrew, streaming output in real time."""
+    target = tool.install.target
+    if not target:
+        emit_error(tool.id, "No brew target specified in tools.json")
+        return False
+
+    cmd = ["brew", "uninstall"]
+    if cask:
+        cmd.append("--cask")
+    cmd.append(target)
+
+    emit_log(f"$ {' '.join(cmd)}", tool=tool.id)
+    return _run_streaming(cmd, tool.id, timeout=120)
+
+
 # ─── Brew ─────────────────────────────────────────────────────
 
 def _brew_install(tool: Tool, cask: bool) -> bool:
-    """Install via Homebrew."""
+    """Install via Homebrew, streaming output in real time."""
     target = tool.install.target
     if not target:
         emit_error(tool.id, "No brew target specified in tools.json")
@@ -203,21 +270,7 @@ def _brew_install(tool: Tool, cask: bool) -> bool:
     cmd.append(target)
 
     emit_log(f"$ {' '.join(cmd)}", tool=tool.id)
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=600,  # 10 min timeout for large installs
-            env=_shell_env(),
-        )
-    except subprocess.TimeoutExpired:
-        emit_error(tool.id, "brew install timed out after 10 minutes")
-        return False
-
-    _log_output(result, tool.id)
-    return result.returncode == 0
+    return _run_streaming(cmd, tool.id, timeout=600)
 
 
 # ─── Script ───────────────────────────────────────────────────
@@ -247,38 +300,25 @@ def _script_install(tool: Tool) -> bool:
             return False
         keepalive = _start_sudo_keepalive(env)
 
+        # Re-validate sudo is still active right before launching the privileged script.
+        # Guards against the rare case where priming succeeded but credentials expired
+        # before the keepalive kicked in.
+        if not _validate_sudo_credentials(env):
+            _stop_sudo_keepalive(keepalive)
+            emit_error(tool.id, "Admin credentials expired before install started — please try again")
+            return False
+
     try:
-        result = subprocess.run(
-            script,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=600,
-            env=env,
-        )
-    except subprocess.TimeoutExpired:
-        emit_error(tool.id, "Script timed out after 10 minutes")
-        return False
+        success = _run_streaming(script, tool.id, timeout=600, shell=True, env=env)
     finally:
         _stop_sudo_keepalive(keepalive)
         if tool.install.requires_admin:
             _invalidate_sudo_credentials(env)
 
-    _log_output(result, tool.id)
-    return result.returncode == 0
+    return success
 
 
 # ─── Helpers ──────────────────────────────────────────────────
-
-def _log_output(result: subprocess.CompletedProcess, tool_id: str) -> None:
-    """Log stdout/stderr lines, skipping empty ones."""
-    for stream in [result.stdout, result.stderr]:
-        if stream:
-            for line in stream.strip().split("\n"):
-                line = line.strip()
-                if line:
-                    emit_log(line, tool=tool_id)
-
 
 def _request_admin_password(tool: Tool) -> str:
     """Request an admin password from the GUI or terminal."""
@@ -309,12 +349,25 @@ def _prime_sudo_credentials(tool: Tool, password: str, env: dict[str, str]) -> b
         emit_error(tool.id, "Admin authentication timed out")
         return False
 
-    _log_output(result, tool.id)
     if result.returncode != 0:
         emit_error(tool.id, "Admin authentication failed")
         return False
 
     return True
+
+
+def _validate_sudo_credentials(env: dict[str, str]) -> bool:
+    """Check that cached sudo credentials are still valid (no password prompt)."""
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-v"],
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
 
 
 def _start_sudo_keepalive(env: dict[str, str]) -> subprocess.Popen | None:

@@ -1,8 +1,8 @@
 """Config capture and apply commands."""
 
 import os
-import sys
 import shutil
+import sys
 from pathlib import Path
 
 import click
@@ -27,6 +27,31 @@ def _all_configs(registry: Registry):
             yield tool, config
 
 
+def _validate_config_path(target: str) -> None:
+    """Ensure config target is a safe relative path with no directory traversal."""
+    p = Path(target)
+    if p.is_absolute() or any(part == ".." for part in p.parts):
+        raise ValueError(f"Unsafe config target path: {target!r}")
+
+
+def _copy_dir_streaming(source: Path, target: Path, tool_id: str, ignored: set[str]) -> None:
+    """Copy a directory tree file-by-file, emitting progress per file."""
+    if target.exists():
+        shutil.rmtree(target)
+    for root, dirs, files in os.walk(source):
+        # Skip ignored directory names in-place so os.walk prunes them
+        dirs[:] = [d for d in dirs if d not in ignored]
+        rel_root = Path(root).relative_to(source)
+        (target / rel_root).mkdir(parents=True, exist_ok=True)
+        for fname in files:
+            if fname.endswith(".pyc") or fname == "lazy-lock.json":
+                continue
+            src_file = Path(root) / fname
+            dst_file = target / rel_root / fname
+            emit_progress(tool_id, f"Copying {rel_root / fname}")
+            shutil.copy2(src_file, dst_file)
+
+
 @click.group("configs")
 def configs_cmd():
     """Manage dotfiles and configuration files."""
@@ -42,6 +67,7 @@ def capture():
 
     count = 0
     for tool, config in _all_configs(registry):
+        _validate_config_path(config.target)
         source = Path(os.path.expanduser(config.source))
         target = configs_dir / config.target
 
@@ -50,15 +76,13 @@ def capture():
             continue
 
         emit_progress(tool.id, f"Capturing {config.source}")
-
         target.parent.mkdir(parents=True, exist_ok=True)
 
         if config.is_dir:
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(source, target, ignore=shutil.ignore_patterns(
-                "__pycache__", ".git", "*.pyc", "lazy-lock.json"
-            ))
+            _copy_dir_streaming(
+                source, target, tool.id,
+                ignored={"__pycache__", ".git"}
+            )
         else:
             shutil.copy2(source, target)
 
@@ -83,6 +107,7 @@ def apply(dry_run):
 
     count = 0
     for tool, config in _all_configs(registry):
+        _validate_config_path(config.target)
         source = configs_dir / config.target
         target = Path(os.path.expanduser(config.source))
 
@@ -109,9 +134,7 @@ def apply(dry_run):
         # Apply
         target.parent.mkdir(parents=True, exist_ok=True)
         if config.is_dir:
-            if target.exists():
-                shutil.rmtree(target)
-            shutil.copytree(source, target)
+            _copy_dir_streaming(source, target, tool.id, ignored={"__pycache__", ".git"})
         else:
             shutil.copy2(source, target)
 

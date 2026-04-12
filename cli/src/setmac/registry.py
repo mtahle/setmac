@@ -7,6 +7,8 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+SUPPORTED_SCHEMA_VERSION = 1
+
 
 @dataclass
 class CheckSpec:
@@ -96,11 +98,55 @@ class Registry:
         with open(manifest_path) as f:
             data = json.load(f)
 
+        schema_version = data.get("schema_version", 1)
+        if schema_version != SUPPORTED_SCHEMA_VERSION:
+            raise ValueError(
+                f"tools.json schema_version {schema_version} is not supported. "
+                f"Expected {SUPPORTED_SCHEMA_VERSION}."
+            )
+
         self.version = data.get("version", "0.0.0")
         self.name = data.get("name", "")
         self.description = data.get("description", "")
         self.tools: list[Tool] = [_parse_tool(t) for t in data.get("tools", [])]
         self._by_id: dict[str, Tool] = {t.id: t for t in self.tools}
+
+        self._validate_check_specs()
+        self._check_cycles()
+
+    def _validate_check_specs(self) -> None:
+        """Ensure every tool has at least one check strategy (command or path)."""
+        missing = [
+            t.id for t in self.tools
+            if not t.check.command and not t.check.path
+        ]
+        if missing:
+            raise ValueError(
+                f"tools.json: the following tools have no check.command or check.path: "
+                f"{', '.join(missing)}"
+            )
+
+    def _check_cycles(self) -> None:
+        """Detect circular dependencies using DFS. Raises ValueError on cycle."""
+        in_stack: set[str] = set()
+        visited: set[str] = set()
+
+        def visit(tool_id: str, path: list[str]) -> None:
+            if tool_id in in_stack:
+                cycle = " -> ".join(path[path.index(tool_id):] + [tool_id])
+                raise ValueError(f"Circular dependency in tools.json: {cycle}")
+            if tool_id in visited:
+                return
+            in_stack.add(tool_id)
+            tool = self._by_id.get(tool_id)
+            if tool:
+                for dep in tool.depends_on:
+                    visit(dep, path + [tool_id])
+            in_stack.discard(tool_id)
+            visited.add(tool_id)
+
+        for tool in self.tools:
+            visit(tool.id, [])
 
     def get(self, tool_id: str) -> Tool | None:
         return self._by_id.get(tool_id)
