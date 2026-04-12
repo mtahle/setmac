@@ -76,7 +76,7 @@ struct ConfigsView: View {
         isRunning = true
         state.isRunning = true
         for await msg in await bridge.runCommand(args) {
-            await processMessage(msg)
+            await state.handle(msg, bridge: bridge)
         }
         state.isRunning = false
         isRunning = false
@@ -84,21 +84,6 @@ struct ConfigsView: View {
         // Refresh config status after capture/apply so UI shows current state
         if args.count > 1, ["capture", "apply"].contains(args[1]) {
             await loadConfigStatus()
-        }
-    }
-
-    private func processMessage(_ msg: CLIMessage) async {
-        if msg.type == "auth_required" {
-            let password = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
-                state.pendingAuthRequest = AuthRequest(
-                    tool: msg.tool ?? "",
-                    message: msg.message ?? "Admin password required for installation"
-                )
-                state.pendingAuthContinuation = { cont.resume(returning: $0) }
-            }
-            await bridge.providePassword(password)
-        } else {
-            state.applyMessage(msg)
         }
     }
 }

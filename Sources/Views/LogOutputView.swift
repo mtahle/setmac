@@ -14,13 +14,14 @@ struct LogOutputView: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Text("Log")
-                    .font(.caption)
-                    .fontWeight(.medium)
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text("(\(lines.count) lines)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .monospacedDigit()
+                Text("\(lines.count)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.55))
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(.white.opacity(0.12), in: Capsule())
 
                 Spacer()
 
@@ -49,7 +50,11 @@ struct LogOutputView: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
-            .background(.black.opacity(0.6))
+            .background(.black.opacity(0.75))
+
+        Rectangle()
+            .fill(.white.opacity(0.08))
+            .frame(height: 0.5)
 
             if !isCollapsed {
                 ScrollViewReader { proxy in

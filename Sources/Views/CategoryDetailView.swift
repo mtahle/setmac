@@ -25,18 +25,23 @@ struct CategoryDetailView: View {
                 categoryBanner
 
                 LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 140, maximum: 160), spacing: 14)],
-                    spacing: 14
+                    columns: [GridItem(.flexible()), GridItem(.flexible())],
+                    spacing: 0
                 ) {
                     ForEach(tools) { tool in
-                        AppStoreToolCard(
-                            tool: tool,
-                            status: state.status(for: tool.id),
-                            onInstall: { Task { await install(tool.id) } }
-                        )
+                        VStack(spacing: 0) {
+                            ToolCardView(
+                                tool: tool,
+                                status: state.status(for: tool.id),
+                                onInstall: { Task { await install(tool.id) } },
+                                onUninstall: { Task { await uninstall(tool.id) } }
+                            )
+                            .padding(.horizontal, 16)
+                            Divider()
+                                .padding(.leading, 86)
+                        }
                     }
                 }
-                .padding()
 
                 if !state.logLines.isEmpty {
                     Divider()
@@ -48,15 +53,6 @@ struct CategoryDetailView: View {
                 }
             }
         }
-        .toolbar {
-            ToolbarItemGroup(placement: .primaryAction) {
-                Button("Install All", systemImage: "arrow.down.circle") {
-                    Task { await installCategory() }
-                }
-                .disabled(isInstalling || allInstalled)
-                .help("Install all tools in this category")
-            }
-        }
         .navigationTitle(category.displayName)
     }
 
@@ -65,7 +61,7 @@ struct CategoryDetailView: View {
     private var categoryBanner: some View {
         ZStack(alignment: .bottomLeading) {
             LinearGradient(
-                colors: [category.color, category.color.opacity(0.5)],
+                colors: [category.color, category.color.mix(with: .black, by: 0.4)],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
             )
@@ -113,11 +109,24 @@ struct CategoryDetailView: View {
         isInstalling = true
         state.isRunning = true
         for await msg in await bridge.install(toolId: toolId) {
-            await processMessage(msg)
+            await state.handle(msg, bridge: bridge)
         }
         state.isRunning = false
         isInstalling = false
         log.info("Install finished for: \(toolId)")
+    }
+
+    private func uninstall(_ toolId: String) async {
+        log.info("Uninstalling tool: \(toolId)")
+        isInstalling = true
+        state.statuses[toolId] = .uninstalling
+        state.isRunning = true
+        for await msg in await bridge.uninstall(toolId: toolId) {
+            state.applyMessage(msg)
+        }
+        state.isRunning = false
+        isInstalling = false
+        log.info("Uninstall finished for: \(toolId)")
     }
 
     private func installCategory() async {
@@ -125,25 +134,10 @@ struct CategoryDetailView: View {
         isInstalling = true
         state.isRunning = true
         for await msg in await bridge.installCategory(category.rawValue) {
-            await processMessage(msg)
+            await state.handle(msg, bridge: bridge)
         }
         state.isRunning = false
         isInstalling = false
         log.info("Category install finished: \(category.rawValue)")
-    }
-
-    private func processMessage(_ msg: CLIMessage) async {
-        if msg.type == "auth_required" {
-            let password = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
-                state.pendingAuthRequest = AuthRequest(
-                    tool: msg.tool ?? "",
-                    message: msg.message ?? "Admin password required for installation"
-                )
-                state.pendingAuthContinuation = { cont.resume(returning: $0) }
-            }
-            await bridge.providePassword(password)
-        } else {
-            state.applyMessage(msg)
-        }
     }
 }

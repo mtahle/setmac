@@ -24,17 +24,26 @@ struct SearchResultsView: View {
             if results.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else {
-                List {
-                    ForEach(results, id: \.tool.id) { item in
-                        ToolCardView(
-                            tool: item.tool,
-                            status: state.status(for: item.tool.id),
-                            onInstall: {
-                                Task { await install(item.tool.id) }
+                ScrollView {
+                    LazyVGrid(
+                        columns: [GridItem(.flexible()), GridItem(.flexible())],
+                        spacing: 0
+                    ) {
+                        ForEach(results, id: \.tool.id) { item in
+                            VStack(spacing: 0) {
+                                ToolCardView(
+                                    tool: item.tool,
+                                    status: state.status(for: item.tool.id),
+                                    onInstall: { Task { await install(item.tool.id) } },
+                                    onUninstall: { Task { await uninstall(item.tool.id) } }
+                                )
+                                .padding(.horizontal, 16)
+                                Divider()
+                                    .padding(.leading, 86)
                             }
-                        )
-                        .listRowSeparator(.visible)
+                        }
                     }
+                    .padding(.top, 8)
                 }
             }
         }
@@ -44,23 +53,19 @@ struct SearchResultsView: View {
     private func install(_ toolId: String) async {
         state.isRunning = true
         for await msg in await bridge.install(toolId: toolId) {
-            await processMessage(msg)
+            await state.handle(msg, bridge: bridge)
         }
         state.isRunning = false
     }
 
-    private func processMessage(_ msg: CLIMessage) async {
-        if msg.type == "auth_required" {
-            let password = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
-                state.pendingAuthRequest = AuthRequest(
-                    tool: msg.tool ?? "",
-                    message: msg.message ?? "Admin password required for installation"
-                )
-                state.pendingAuthContinuation = { cont.resume(returning: $0) }
-            }
-            await bridge.providePassword(password)
-        } else {
+    private func uninstall(_ toolId: String) async {
+        state.statuses[toolId] = .uninstalling
+        state.isRunning = true
+        for await msg in await bridge.uninstall(toolId: toolId) {
             state.applyMessage(msg)
         }
+        state.isRunning = false
     }
+
+    // TODO: add search debounce if tool count grows beyond ~150
 }

@@ -1,59 +1,57 @@
 import SwiftUI
 
-/// Horizontal list-style card — used in search results and anywhere a row layout is needed.
+/// App Store–style horizontal row. Designed to sit in a 2-column LazyVGrid.
 struct ToolCardView: View {
     let tool: ToolDefinition
     let status: ToolStatus
     let onInstall: () -> Void
+    var onUninstall: (() -> Void)? = nil
 
     var body: some View {
         HStack(spacing: 14) {
-            // Icon tile (App Store search style)
-            ZStack {
-                RoundedRectangle(cornerRadius: 12)
-                    .fill(tool.swiftColor.opacity(0.12))
-                    .frame(width: 48, height: 48)
-                Image(systemName: tool.icon)
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundStyle(tool.swiftColor)
-            }
+            ToolIconView(tool: tool, status: status, size: 56)
 
-            // Text stack
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(tool.name)
                     .font(.headline)
                     .lineLimit(1)
 
                 Text(tool.description)
-                    .font(.caption)
+                    .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
 
-                statusLine
+                statusTag
             }
 
-            Spacer()
+            Spacer(minLength: 8)
 
+            // fixedSize() prevents the button from being squished and wrapping
             actionBadge
+                .fixedSize()
         }
-        .padding(.vertical, 4)
+        .padding(.vertical, 10)
     }
 
-    // MARK: - Status line (third row, only when meaningful)
+    // MARK: - Small status tag shown below description
 
     @ViewBuilder
-    private var statusLine: some View {
+    private var statusTag: some View {
         switch status {
         case .installed(let version):
             if let v = version {
                 Text(v)
-                    .font(.caption2)
+                    .font(.caption2.monospacedDigit())
                     .foregroundStyle(.tertiary)
                     .lineLimit(1)
             }
         case .installing:
             Text("Installing…")
+                .font(.caption2)
+                .foregroundStyle(.orange)
+        case .uninstalling:
+            Text("Uninstalling…")
                 .font(.caption2)
                 .foregroundStyle(.orange)
         case .checking:
@@ -65,52 +63,64 @@ struct ToolCardView: View {
                 .font(.caption2)
                 .foregroundStyle(.red)
                 .lineLimit(1)
-                .truncationMode(.tail)
         case .notInstalled, .unknown:
             EmptyView()
         }
     }
 
-    // MARK: - Action badge (right side)
+    // MARK: - Right-side action
 
     @ViewBuilder
     private var actionBadge: some View {
         switch status {
         case .installed:
-            Label("Installed", systemImage: "checkmark")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.green)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(.green.opacity(0.12), in: Capsule())
+            HStack(spacing: 8) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.title3)
+
+                if let onUninstall {
+                    Button(action: onUninstall) {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Uninstall \(tool.name)")
+                }
+            }
 
         case .notInstalled:
-            Button("GET", action: onInstall)
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.blue)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 4)
-                .background(.blue.opacity(0.1), in: Capsule())
-                .buttonStyle(.plain)
+            Button(action: onInstall) {
+                Text("GET")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.blue)
+                    .frame(minWidth: 62)
+                    .padding(.vertical, 6)
+                    .background(.blue.opacity(0.1), in: Capsule())
+            }
+            .buttonStyle(.plain)
 
-        case .installing, .checking:
+        case .installing, .uninstalling, .checking:
             ProgressView()
                 .controlSize(.small)
+                .frame(width: 62)
 
         case .error:
             Button(action: onInstall) {
-                Label("Retry", systemImage: "exclamationmark")
-                    .font(.caption2.weight(.bold))
+                Text("Retry")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.red)
+                    .frame(minWidth: 62)
+                    .padding(.vertical, 6)
+                    .background(.red.opacity(0.1), in: Capsule())
             }
-            .foregroundStyle(.red)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(.red.opacity(0.1), in: Capsule())
             .buttonStyle(.plain)
 
         case .unknown:
             Image(systemName: "questionmark.circle")
                 .foregroundStyle(.tertiary)
+                .frame(width: 62)
                 .help("Status unknown — refresh to check")
         }
     }
