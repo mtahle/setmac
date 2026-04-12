@@ -67,11 +67,6 @@ private final class StreamingLineParser: @unchecked Sendable {
     }
 }
 
-/// Holds the current process's stdin write handle so we can inject the password on auth_required.
-private final class StdinHandleHolder: @unchecked Sendable {
-    var handle: FileHandle?
-}
-
 /// Thread-safe byte accumulator for stderr (not streamed, read at exit).
 private final class DataBuffer: @unchecked Sendable {
     private var data = Data()
@@ -92,16 +87,23 @@ private final class DataBuffer: @unchecked Sendable {
 }
 
 actor CLIBridge {
-    private let stdinHolder = StdinHandleHolder()
+    /// The stdin write handle for the currently running CLI process.
+    /// Actor isolation ensures writes and clears are serialized.
+    private var activeStdinHandle: FileHandle?
+
+    private func setStdinHandle(_ handle: FileHandle?) {
+        activeStdinHandle = handle
+    }
 
     func providePassword(_ password: String) {
-        guard let handle = stdinHolder.handle else { return }
+        guard let handle = activeStdinHandle else { return }
         let data = (password + "\n").data(using: .utf8) ?? Data()
         handle.write(data)
     }
 
     func runCommand(_ args: [String]) -> AsyncStream<CLIMessage> {
-        AsyncStream { continuation in
+        let bridge = self
+        return AsyncStream { continuation in
             let process = Process()
             let stdoutPipe = Pipe()
             let stderrPipe = Pipe()
@@ -142,8 +144,6 @@ actor CLIBridge {
             let fullCmd = ([process.executableURL?.lastPathComponent ?? "?"] + (process.arguments ?? [])).joined(separator: " ")
             log.info("Running: \(fullCmd, privacy: .public)")
 
-            let holder = stdinHolder
-
             // Rich PATH for subprocess tools
             var env = ProcessInfo.processInfo.environment
             let home = NSHomeDirectory()
@@ -167,15 +167,17 @@ actor CLIBridge {
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
             process.standardInput = stdinPipe
-            holder.handle = stdinPipe.fileHandleForWriting
+
+            // Register the stdin handle on the actor so providePassword() can write to it.
+            // The Task runs immediately (before auth_required can arrive) since process startup
+            // takes far longer than an actor hop.
+            Task { await bridge.setStdinHandle(stdinPipe.fileHandleForWriting) }
 
             // Stream stdout: parse JSON lines and yield to UI as they arrive
             let parser = StreamingLineParser(continuation: continuation)
             let stderrBuffer = DataBuffer()
 
             // Parse and yield on a background queue to avoid blocking the main RunLoop.
-            // The handler can run on the main thread; yield blocks until the consumer takes the value.
-            // If we block the main thread, the MainActor consumer can't run — deadlock.
             let parseQueue = DispatchQueue(label: "com.v0id.setmac.cli-parse", qos: .userInitiated)
             stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
                 let chunk = handle.availableData
@@ -206,7 +208,7 @@ actor CLIBridge {
 
                 stdoutPipe.fileHandleForReading.readabilityHandler = nil
                 stderrPipe.fileHandleForReading.readabilityHandler = nil
-                holder.handle = nil
+                Task { await bridge.setStdinHandle(nil) }
                 try? stdinPipe.fileHandleForWriting.close()
                 try? stdoutPipe.fileHandleForWriting.close()
                 try? stderrPipe.fileHandleForWriting.close()
@@ -282,5 +284,9 @@ actor CLIBridge {
 
     func installCategory(_ category: String) -> AsyncStream<CLIMessage> {
         runCommand(["install", category, "--category"])
+    }
+
+    func uninstall(toolId: String) -> AsyncStream<CLIMessage> {
+        runCommand(["uninstall", toolId])
     }
 }

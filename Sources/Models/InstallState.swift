@@ -11,6 +11,7 @@ enum ToolStatus: Equatable {
     case installed(version: String?)
     case notInstalled
     case installing
+    case uninstalling
     case error(String)
 
     var isInstalled: Bool {
@@ -20,7 +21,7 @@ enum ToolStatus: Equatable {
 
     var isBusy: Bool {
         switch self {
-        case .checking, .installing: true
+        case .checking, .installing, .uninstalling: true
         default: false
         }
     }
@@ -41,6 +42,13 @@ enum ConfigStatus: String, Codable {
     case missing
 }
 
+// MARK: - Config status key — typed struct avoids fragile string interpolation
+
+struct ConfigKey: Hashable {
+    let toolId: String
+    let target: String
+}
+
 // MARK: - CLI message (decoded from JSON-line output)
 
 struct CLIMessage: Codable {
@@ -56,6 +64,7 @@ struct CLIMessage: Codable {
 // MARK: - Observable state
 
 @Observable
+@MainActor
 final class InstallState {
     var manifest: ToolManifest?
     var statuses: [String: ToolStatus] = [:]
@@ -67,8 +76,8 @@ final class InstallState {
     /// Called with password (or "" for cancel) when user submits/cancels.
     var pendingAuthContinuation: ((String) -> Void)?
 
-    /// Config status keyed by "toolId:target" for bundled/system/missing.
-    var configStatuses: [String: ConfigStatus] = [:]
+    /// Config status keyed by (toolId, target) for bundled/system/missing.
+    var configStatuses: [ConfigKey: ConfigStatus] = [:]
 
     struct LogLine: Identifiable {
         let id = UUID()
@@ -104,7 +113,6 @@ final class InstallState {
         statuses.values.filter(\.isInstalled).count
     }
 
-    @MainActor
     func applyMessage(_ msg: CLIMessage) {
         if let tool = msg.tool {
             switch msg.type {
@@ -122,6 +130,9 @@ final class InstallState {
             case "complete":
                 statuses[tool] = .installed(version: msg.version)
                 log.info("\(tool, privacy: .public): install complete (\(msg.version ?? "", privacy: .public))")
+            case "uninstalled":
+                statuses[tool] = .notInstalled
+                log.info("\(tool, privacy: .public): uninstalled")
             case "error":
                 statuses[tool] = .error(msg.message ?? "Unknown error")
                 log.error("\(tool, privacy: .public): error — \(msg.message ?? "Unknown error", privacy: .public)")
@@ -130,7 +141,7 @@ final class InstallState {
             case "config_status":
                 if let target = msg.target, let statusStr = msg.status,
                    let status = ConfigStatus(rawValue: statusStr) {
-                    configStatuses["\(tool):\(target)"] = status
+                    configStatuses[ConfigKey(toolId: tool, target: target)] = status
                 }
             default:
                 log.warning("Unknown message type '\(msg.type, privacy: .public)' for \(tool, privacy: .public)")
@@ -146,6 +157,23 @@ final class InstallState {
         }
     }
 
+    /// Single entry point for CLI messages: handles auth_required flow, delegates all else to applyMessage.
+    /// Replaces the repeated processMessage() blocks that were in every view.
+    func handle(_ msg: CLIMessage, bridge: CLIBridge) async {
+        if msg.type == "auth_required" {
+            let password = await withCheckedContinuation { (cont: CheckedContinuation<String, Never>) in
+                pendingAuthRequest = AuthRequest(
+                    tool: msg.tool ?? "",
+                    message: msg.message ?? "Admin password required for installation"
+                )
+                pendingAuthContinuation = { cont.resume(returning: $0) }
+            }
+            await bridge.providePassword(password)
+        } else {
+            applyMessage(msg)
+        }
+    }
+
     /// Called from password sheet when user submits or cancels.
     func fulfillAuthRequest(_ password: String) {
         pendingAuthContinuation?(password)
@@ -154,7 +182,7 @@ final class InstallState {
     }
 
     func configStatus(toolId: String, target: String) -> ConfigStatus? {
-        configStatuses["\(toolId):\(target)"]
+        configStatuses[ConfigKey(toolId: toolId, target: target)]
     }
 
     func clearLogs() {

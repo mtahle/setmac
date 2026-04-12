@@ -12,6 +12,11 @@ let package = Package(
             resources: [
                 .process("../Resources/Assets.xcassets"),
             ]
-        )
+        ),
+        .testTarget(
+            name: "SetmacTests",
+            dependencies: ["Setmac"],
+            path: "Tests/SetmacTests"
+        ),
     ]
 )

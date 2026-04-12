@@ -3,11 +3,17 @@ import SwiftUI
 // MARK: - Codable types matching tools.json
 
 struct ToolManifest: Codable {
+    let schemaVersion: Int
     let version: String
     let name: String
     let description: String
     let author: String
     let tools: [ToolDefinition]
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case version, name, description, author, tools
+    }
 }
 
 struct ToolDefinition: Codable, Identifiable, Hashable {

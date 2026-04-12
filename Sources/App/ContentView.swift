@@ -7,7 +7,7 @@ struct ContentView: View {
     @State private var selectedItem: SidebarItem? = .overview
     @State private var state = InstallState()
     @State private var bridge = CLIBridge()
-    @State private var errorMessage: String?
+    @State private var manifestError: ManifestLoadError?
     @State private var searchText = ""
 
     var body: some View {
@@ -30,19 +30,25 @@ struct ContentView: View {
         .searchable(text: $searchText, placement: .sidebar, prompt: "Search tools…")
         .task {
             log.info("App launched, loading manifest...")
-            state.manifest = ManifestLoader.load()
-            log.info("Manifest loaded: \(state.totalTools, privacy: .public) tools")
-            log.info("Starting status refresh...")
-            await refreshStatuses()
-            log.info("Status refresh complete: \(state.installedCount, privacy: .public)/\(state.totalTools, privacy: .public) installed")
+            switch ManifestLoader.load() {
+            case let .success(manifest):
+                state.manifest = manifest
+                log.info("Manifest loaded: \(state.totalTools, privacy: .public) tools")
+                log.info("Starting status refresh...")
+                await refreshStatuses()
+                log.info("Status refresh complete: \(state.installedCount, privacy: .public)/\(state.totalTools, privacy: .public) installed")
+            case let .failure(err):
+                log.error("Failed to load manifest: \(err.description, privacy: .public)")
+                manifestError = err
+            }
         }
-        .alert("Error", isPresented: .init(
-            get: { errorMessage != nil },
-            set: { if !$0 { errorMessage = nil } }
+        .alert("Cannot Load Manifest", isPresented: .init(
+            get: { manifestError != nil },
+            set: { if !$0 { manifestError = nil } }
         )) {
-            Button("OK") { errorMessage = nil }
+            Button("OK") { manifestError = nil }
         } message: {
-            Text(errorMessage ?? "")
+            Text(manifestError?.description ?? "")
         }
         .sheet(item: Binding(
             get: { state.pendingAuthRequest },
@@ -61,7 +67,6 @@ struct ContentView: View {
         for await msg in await bridge.checkAllStatuses() {
             if msg.type == "error" {
                 log.error("Status check error: \(msg.message ?? "unknown", privacy: .public)")
-                errorMessage = msg.message ?? "CLI failed to check tool statuses"
             }
             state.applyMessage(msg)
         }
